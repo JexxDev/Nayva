@@ -13,7 +13,7 @@ import win32con
 
 # ===================== CHEMIN DU MODÈLE =====================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MODEL_PATH = os.path.join(BASE_DIR, "runs", "detect", "train8", "weights", "best.pt")
+MODEL_PATH = os.path.join(BASE_DIR, "runs", "detect", "train2", "weights", "best.pt")
 
 # ===================== CONFIG GÉNÉRALE =====================
 CONF_MIN = 0.6                
