@@ -10,10 +10,26 @@ import ctypes
 import sys
 import win32api
 import win32con
+import glob
 
-# ===================== CHEMIN DU MODÈLE =====================
+# Dossier où est nayva_ai.py (et où le zip modèle est extrait)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MODEL_PATH = os.path.join(BASE_DIR, "runs", "detect", "train2", "weights", "best.pt")
+
+# Recherche automatique de best.pt (très fiable)
+model_files = glob.glob(os.path.join(BASE_DIR, "**", "best.pt"), recursive=True)
+
+if model_files:
+    MODEL_PATH = model_files[0]  # Prend le premier trouvé (normalement y en a qu'un)
+    print(f"Modèle trouvé automatiquement : {MODEL_PATH}")
+else:
+    print("ERREUR : Aucun best.pt trouvé !")
+    print("Dossier actuel :", BASE_DIR)
+    print("Fichiers présents :", os.listdir(BASE_DIR))
+    # Debug plus profond si besoin
+    print("Recherche complète :", glob.glob(os.path.join(BASE_DIR, "**/*"), recursive=True))
+    raise FileNotFoundError("best.pt introuvable dans l'extraction")
+
+model = YOLO(MODEL_PATH)
 
 # ===================== CONFIG GÉNÉRALE =====================
 CONF_MIN = 0.6                
