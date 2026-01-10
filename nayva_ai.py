@@ -73,7 +73,7 @@ LOCK_SWITCH_THRESHOLD = 150         # Distance min pour changer de cible (pixels
 LOCK_DETECTION_COUNT = 3            # Nombre de frames avant de verrouiller
 LOCK_LOST_TIMEOUT = 0.5             # Temps avant de perdre le lock (secondes)
 
-CLASS_COLORS = {0: "red", 1: "green"}
+CLASS_COLORS = {0: "red", 1: "green", 3: "yellow"}
 
 # ===================== IMPORT BETTERCAM =====================
 try:
