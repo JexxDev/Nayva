@@ -52,6 +52,10 @@ CENTER_Y = SCREEN_HEIGHT // 2
 CENTER_TOLERANCE = 40
 CLICK_COOLDOWN = 0.01
 
+# === FILTRAGE DES CLASSES ===
+# Seulement viser et tirer sur ces classes
+TARGET_CLASSES = ["Character", "Sniper"]
+
 # === AIM ASSIST ADAPTATIF ===
 AIM_ASSIST_ENABLED = True
 AIM_DEADZONE = 15                   # Deadzone réduite
@@ -77,6 +81,11 @@ try:
 except ImportError:
     print("❌ bettercam n'est pas installé. Installe-le avec : pip install bettercam")
     sys.exit(1)
+
+# ===================== FILTRAGE DES CLASSES =====================
+def is_target_class(class_name):
+    """Vérifie si la classe est une cible valide"""
+    return class_name in TARGET_CLASSES
 
 # ===================== VERROUILLAGE DE CIBLE =====================
 class TargetLock:
@@ -413,16 +422,27 @@ class Overlay:
             x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
             cls = int(cls)
 
+            class_name = self.class_names.get(cls, f'C{cls}')
+            is_target = is_target_class(class_name)
+            
             in_center = is_in_center(x1, y1, x2, y2)
-            color = "yellow" if in_center else CLASS_COLORS.get(cls, "white")
-            width = 5 if in_center else 3
+            
+            # Couleur selon si c'est une cible valide
+            if is_target:
+                color = "yellow" if in_center else CLASS_COLORS.get(cls, "white")
+            else:
+                color = "gray"  # Gris pour les non-cibles
+            
+            width = 5 if (in_center and is_target) else 3
 
             box_id = self.canvas.create_rectangle(x1, y1, x2, y2, outline=color, width=width)
             self.canvas_objects.append(box_id)
 
-            label = f"{self.class_names.get(cls, f'C{cls}')} {conf:.2f}"
-            if in_center:
+            label = f"{class_name} {conf:.2f}"
+            if in_center and is_target:
                 label += " 🎯"
+            elif not is_target:
+                label += " ⛔"
 
             bg_id = self.canvas.create_rectangle(x1, y1 - 20, x1 + len(label) * 8, y1, fill="black", outline="")
             text_id = self.canvas.create_text(x1 + 3, y1 - 10, text=label, fill=color, anchor="w", font=("Arial", 10, "bold"))
@@ -481,9 +501,11 @@ def detect_loop():
     global overlay_instance, last_move_x, last_move_y
 
     print("🚀 AIMBOT AVEC VERROUILLAGE DE CIBLE")
+    print("🎯 CIBLES: Character et Sniper UNIQUEMENT")
     print("🟢 Point VERT BRILLANT = cible verrouillée")
     print("🟡 Point JAUNE = acquisition (3 frames)")
     print("🟠 Point ORANGE = détection simple")
+    print("⛔ GRIS = Ignoré (autres classes)")
     print("🔒 Reste sur la même cible (évite les switch)")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -528,15 +550,18 @@ def detect_loop():
 
                 conf = confs[i]
                 cls = int(classes[i])
+                class_name = class_names.get(cls, f'C{cls}')
 
                 detections.append([x1, y1, x2, y2, conf, cls])
 
-                if conf >= CONF_MIN_AIM:
+                # FILTRAGE: Seulement les classes "Character" et "Sniper"
+                if conf >= CONF_MIN_AIM and is_target_class(class_name):
                     valid_targets.append([x1, y1, x2, y2, conf, cls])
+                    print(f"✅ Cible valide détectée: {class_name} (conf={conf:.2f})")
 
             last_detections = detections
 
-            # === AIM ASSIST AVEC VERROUILLAGE ===
+            # === AIM ASSIST AVEC VERROUILLAGE (seulement sur cibles valides) ===
             if AIM_ASSIST_ENABLED and valid_targets:
                 
                 # SYSTÈME DE VERROUILLAGE
@@ -558,14 +583,18 @@ def detect_loop():
                         target_x, target_y, box_width, box_height, last_move_x, last_move_y
                     )
 
-            # Auto-click si cible au centre
+            # Auto-click si cible au centre ET c'est une classe valide
             current_time = time.time()
             if current_time - last_click_time >= CLICK_COOLDOWN:
                 for det in detections:
-                    if is_in_center(*det[:4]):
+                    cls = int(det[5])
+                    class_name = class_names.get(cls, f'C{cls}')
+                    
+                    # Ne tire QUE sur Character et Sniper
+                    if is_in_center(*det[:4]) and is_target_class(class_name):
                         windows_click()
                         last_click_time = current_time
-                        print("💥 CLICK WIN32!")
+                        print(f"💥 CLICK WIN32 sur {class_name}!")
                         break
 
         else:
