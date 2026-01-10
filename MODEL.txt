@@ -1,1 +1,1 @@
-https://www.mediafire.com/file/j925b0i1y55sdqg/yolov8_train2_results.zip/file
+https://www.mediafire.com/file/3ulgpa161t98b6o/runs.zip/file
