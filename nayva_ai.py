@@ -14,13 +14,21 @@ from collections import deque
 
 # ================= CONFIGURATION =================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Recherche plus large du modèle best.pt (runs/detect/trainX/weights/best.pt, etc.)
 model_files = glob.glob(os.path.join(BASE_DIR, "**", "best.pt"), recursive=True)
 
-# ⚠️ Correction : raise ne peut pas être utilisé dans une expression ternaire
-if model_files:
-    MODEL_PATH = model_files[0]
-else:
-    raise FileNotFoundError("best.pt introuvable")
+if not model_files:
+    print("Répertoires trouvés dans le dossier de nayva_ai.py :")
+    print(os.listdir(BASE_DIR))
+    print("\nEt dans les sous-dossiers :")
+    for root, dirs, files in os.walk(BASE_DIR):
+        if "best.pt" in files:
+            print("  →", os.path.join(root, "best.pt"))
+    raise FileNotFoundError("best.pt introuvable dans le dossier nayva_ai.py et ses sous-dossiers")
+
+MODEL_PATH = model_files[0]
+print(f"Modèle chargé : {MODEL_PATH}")
 
 CONF_MIN = 0.20          # un peu plus bas que 0.22
 CONF_MIN_AIM = 0.38      # ↓ pour lock plus facilement
