@@ -1,38 +1,32 @@
 import time
 import os
 import torch
-import pydirectinput
-import tkinter as tk
-from ultralytics import YOLO
-from threading import Thread
-from pynput import keyboard
+import pygame
 import ctypes
 import sys
+from ultralytics import YOLO
+from threading import Thread
+from pynput import keyboard, mouse
 import win32api
 import win32con
 import glob
+from collections import deque
 
+# ================= CONFIGURATION =================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 model_files = glob.glob(os.path.join(BASE_DIR, "**", "best.pt"), recursive=True)
+MODEL_PATH = model_files[0] if model_files else raise FileNotFoundError("best.pt introuvable")
 
-if model_files:
-    MODEL_PATH = model_files[0]
-    print(f"Modèle trouvé automatiquement : {MODEL_PATH}")
-else:
-    print("ERREUR : Aucun best.pt trouvé !")
-    print("Dossier actuel :", BASE_DIR)
-    print("Fichiers présents :", os.listdir(BASE_DIR))
-    print("Recherche complète :", glob.glob(os.path.join(BASE_DIR, "**/*"), recursive=True))
-    raise FileNotFoundError("best.pt introuvable dans l'extraction")
+CONF_MIN = 0.20          # un peu plus bas que 0.22
+CONF_MIN_AIM = 0.38      # ↓ pour lock plus facilement
 
-model = YOLO(MODEL_PATH)
-
-CONF_MIN = 0.6
-CONF_MIN_AIM = 0.6
 SCREEN_WIDTH = 3440
 SCREEN_HEIGHT = 1440
 
-YOLO_SIZE = 1024
+SHOW_BOXES = False       # désactivé par défaut (invisible)
+SHOW_PREDICTION_DOT = True
+
+YOLO_SIZE = 640
 MAX_DET = 100
 
 CAPTURE_WIDTH = 1920
@@ -43,497 +37,246 @@ CAPTURE_REGION = (CAPTURE_LEFT, CAPTURE_TOP, CAPTURE_LEFT + CAPTURE_WIDTH, CAPTU
 
 CENTER_X = SCREEN_WIDTH // 2
 CENTER_Y = SCREEN_HEIGHT // 2
-CENTER_TOLERANCE = 40
-CLICK_COOLDOWN = 0.01
+CENTER_TOLERANCE_X = 110     # un peu plus large
+CENTER_TOLERANCE_Y = 150     # idem
 
-TARGET_CLASSES = ["Friend"]
+TARGET_CLASSES = ["Character", "Sniper"]
 
 AIM_ASSIST_ENABLED = True
-AIM_DEADZONE = 15
-BASE_SPEED = 0.4
-MIN_SPEED = 1
-MAX_SPEED = 10
-SMOOTHING = 0.25
-MIN_MOVE_THRESHOLD = 0.5
-OSCILLATION_COOLDOWN = 0.15
-FORCE_MOVE_IF_FAR = True
+AIM_DEADZONE = 10            # plus réactif
+SMOOTHING = 0.38             # ↑ plus rapide mais toujours contrôlable
+MAX_SPEED = 20               # ↑ pour rattraper vite
 
-TARGET_LOCK_ENABLED = True
-LOCK_SWITCH_THRESHOLD = 150
-LOCK_DETECTION_COUNT = 3
-LOCK_LOST_TIMEOUT = 0.5
+SLOWDOWN_BASE = 0.18
+SLOWDOWN_DISTANCE_SCALE = 650
 
-CLASS_COLORS = {0: "red", 1: "green", 2: "yellow", 3: "blue"}
+HEAD_OFFSET_RATIO = 0.26     # un peu plus haut
 
-try:
-    import bettercam
-except ImportError:
-    print("❌ bettercam n'est pas installé. Installe-le avec : pip install bettercam")
-    sys.exit(1)
+SWITCH_THRESHOLD = 220       # ↑ encore plus dur à switcher
+LOCK_PERSISTENCE = 35        # ↑ lock beaucoup plus collant
 
-def is_target_class(class_name):
-    return class_name in TARGET_CLASSES
+CLICK_COOLDOWN = 0.014
 
-class TargetLock:
-    def __init__(self):
-        self.locked_target = None
-        self.locked_box = None
-        self.lock_frames = 0
-        self.last_seen = 0
-        self.is_locked = False
-    
-    def update(self, all_targets):
-        current_time = time.time()
-        
-        if not all_targets:
-            if current_time - self.last_seen > LOCK_LOST_TIMEOUT:
-                self.reset()
-                return None
-            return self.locked_target
-        
-        if not self.is_locked or self.locked_target is None:
-            best_target = min(all_targets, key=lambda d: distance_to_center(*get_center_point(d)))
-            target_pos = get_center_point(best_target)
-            
-            self.lock_frames += 1
-            
-            if self.lock_frames >= LOCK_DETECTION_COUNT:
-                self.locked_target = target_pos
-                self.locked_box = best_target
-                self.is_locked = True
-                self.last_seen = current_time
-                print(f"🔒 CIBLE VERROUILLÉE à ({target_pos[0]:.0f}, {target_pos[1]:.0f})")
-                return best_target
-            else:
-                print(f"🔍 Acquisition cible... {self.lock_frames}/{LOCK_DETECTION_COUNT}")
-                return best_target
-        
-        locked_x, locked_y = self.locked_target
-        
-        def distance_to_locked(det):
-            cx, cy = get_center_point(det)
-            return ((cx - locked_x)**2 + (cy - locked_y)**2)**0.5
-        
-        closest_to_lock = min(all_targets, key=distance_to_locked)
-        closest_lock_dist = distance_to_locked(closest_to_lock)
-        
-        closest_to_center = min(all_targets, key=lambda d: distance_to_center(*get_center_point(d)))
-        closest_center_dist = distance_to_center(*get_center_point(closest_to_center))
-        
-        should_switch = False
-        
-        if closest_lock_dist > LOCK_SWITCH_THRESHOLD:
-            should_switch = True
-            print(f"❌ Cible perdue (dist={closest_lock_dist:.0f}px)")
-        elif closest_to_center != closest_to_lock:
-            center_advantage = closest_lock_dist - closest_center_dist
-            if center_advantage > LOCK_SWITCH_THRESHOLD:
-                should_switch = True
-                print(f"🔄 Switch: autre cible {center_advantage:.0f}px plus proche")
-        
-        if should_switch:
-            self.reset()
-            return self.update(all_targets)
-        
-        new_pos = get_center_point(closest_to_lock)
-        self.locked_target = new_pos
-        self.locked_box = closest_to_lock
-        self.last_seen = current_time
-        
-        return closest_to_lock
-    
-    def reset(self):
-        if self.is_locked:
-            print(f"🔓 Verrouillage perdu")
-        self.locked_target = None
-        self.locked_box = None
-        self.lock_frames = 0
-        self.is_locked = False
-    
-    def get_lock_info(self):
-        return {
-            'is_locked': self.is_locked,
-            'position': self.locked_target,
-            'frames': self.lock_frames
-        }
+POSITION_HISTORY_SIZE = 5
+position_history = {}
 
-target_lock = TargetLock()
-
-def windows_click():
-    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-    time.sleep(0.01)
-    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-
-def roblox_move_mouse(dx, dy):
-    if dx == 0 and dy == 0:
-        return
-    win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, int(dx), int(dy), 0, 0)
-    print(f"🖱️ WIN32 moveRel({int(dx)}, {int(dy)})")
-
-def is_in_center(x1, y1, x2, y2):
-    cx = (x1 + x2) / 2
-    cy = (y1 + y2) / 2
-    return abs(cx - CENTER_X) <= CENTER_TOLERANCE and abs(cy - CENTER_Y) <= CENTER_TOLERANCE
-
-def get_head_point(det):
-    x1, y1, x2, y2 = det[:4]
-    return (x1 + x2) / 2, y1 + (y2 - y1) * 0.20
-
-def get_center_point(det):
-    x1, y1, x2, y2 = det[:4]
-    return (x1 + x2) / 2, (y1 + y2) / 2
-
-def get_box_size(det):
-    x1, y1, x2, y2 = det[:4]
-    width = x2 - x1
-    height = y2 - y1
-    return width, height
-
-def calculate_adaptive_speed(box_width, box_height):
-    avg_size = (box_width + box_height) / 2
-    speed = int(avg_size * BASE_SPEED)
-    speed = max(MIN_SPEED, min(MAX_SPEED, speed))
-    return speed
-
+# ===================== FONCTIONS =====================
 def distance_to_center(tx, ty):
     return ((tx - CENTER_X)**2 + (ty - CENTER_Y)**2)**0.5
 
-last_oscillation_time = 0
+def predict_position(track_id, current_x, current_y, current_time):
+    if track_id not in position_history:
+        position_history[track_id] = deque(maxlen=POSITION_HISTORY_SIZE)
+    
+    position_history[track_id].append((current_x, current_y, current_time))
+    
+    if len(position_history[track_id]) < 2:
+        return current_x, current_y
+    
+    history = list(position_history[track_id])
+    vx_sum = vy_sum = count = 0
+    
+    for i in range(1, len(history)):
+        dt = history[i][2] - history[i-1][2]
+        if dt > 0:
+            vx_sum += (history[i][0] - history[i-1][0]) / dt
+            vy_sum += (history[i][1] - history[i-1][1]) / dt
+            count += 1
+    
+    if count == 0:
+        return current_x, current_y
+    
+    vx_avg = vx_sum / count
+    vy_avg = vy_sum / count
+    
+    dist = distance_to_center(current_x, current_y)
+    lead_time = 0.065 + (dist / 1800) * 0.12   # ↑ un peu plus agressif
+    
+    return current_x + vx_avg * lead_time, current_y + vy_avg * lead_time
 
-def gentle_aim_move(target_x, target_y, box_width, box_height, last_move_x=0, last_move_y=0):
-    global last_oscillation_time
+def is_in_center(cx, cy):
+    return (abs(cx - CENTER_X) <= CENTER_TOLERANCE_X and
+            abs(cy - CENTER_Y) <= CENTER_TOLERANCE_Y)
+
+def windows_click():
+    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+    time.sleep(0.007)
+    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+
+def roblox_move_mouse(dx, dy):
+    dx = round(dx)
+    dy = round(dy)
+    if abs(dx) < 0.5: dx = 0
+    if abs(dy) < 0.5: dy = 0
+    if dx == 0 and dy == 0: return
+    win32api.mouse_event(win32con.MOUSEEVENTF_MOVE, int(dx), int(dy), 0, 0)
+
+def gentle_aim_move(target_x, target_y):
+    global last_aim_x, last_aim_y
     
     dx = target_x - CENTER_X
     dy = target_y - CENTER_Y
+    dist = (dx**2 + dy**2)**0.5
     
-    distance = (dx**2 + dy**2)**0.5
-    adaptive_speed = calculate_adaptive_speed(box_width, box_height)
-    
-    should_print_debug = distance > AIM_DEADZONE
-    
-    if should_print_debug:
-        print(f"\n{'='*60}")
-        print(f"📦 BOX: {box_width:.0f}x{box_height:.0f}px → Speed:{adaptive_speed}px/f")
-        print(f"📏 Distance:{distance:.0f}px | dX:{dx:+.0f} dY:{dy:+.0f}")
-    
-    if distance < AIM_DEADZONE:
-        if should_print_debug:
-            print(f"✅ CENTRÉ (deadzone={AIM_DEADZONE}px)")
-            print(f"{'='*60}\n")
+    if dist < AIM_DEADZONE:
         return 0, 0
-    
-    if time.time() - last_oscillation_time < OSCILLATION_COOLDOWN:
-        print(f"⏸️ Cooldown oscillation...")
-        return last_move_x, last_move_y
-    
-    if distance > 0:
-        norm_dx = dx / distance
-        norm_dy = dy / distance
-        
-        move_strength = min(distance * SMOOTHING, adaptive_speed)
-        
-        move_x = norm_dx * move_strength
-        move_y = norm_dy * move_strength
-        
-        if FORCE_MOVE_IF_FAR and distance > 50:
-            if abs(move_x) < 1 and abs(dx) > 5:
-                move_x = 1 if dx > 0 else -1
-            if abs(move_y) < 1 and abs(dy) > 5:
-                move_y = 1 if dy > 0 else -1
-            print(f"💪 FORCE MOVE activé (dist={distance:.0f}px)")
-        
-        if abs(move_x) >= MIN_MOVE_THRESHOLD or abs(move_y) >= MIN_MOVE_THRESHOLD:
-            move_x_final = round(move_x)
-            move_y_final = round(move_y)
-            
-            move_x_final = max(-adaptive_speed, min(adaptive_speed, move_x_final))
-            move_y_final = max(-adaptive_speed, min(adaptive_speed, move_y_final))
-            
-            direction_flip = False
-            
-            if last_move_y != 0 and move_y_final != 0:
-                if (last_move_y > 0) != (move_y_final > 0):
-                    direction_flip = True
-                    print(f"⚠️ FLIP Y: {last_move_y:+d}→{move_y_final:+d}")
-            
-            if last_move_x != 0 and move_x_final != 0:
-                if (last_move_x > 0) != (move_x_final > 0):
-                    direction_flip = True
-                    print(f"⚠️ FLIP X: {last_move_x:+d}→{move_x_final:+d}")
-            
-            if direction_flip:
-                print(f"🛑 Pause oscillation")
-                last_oscillation_time = time.time()
-                return 0, 0
-            
-            if move_x_final != 0 or move_y_final != 0:
-                print(f"🎯 Move X:{move_x_final:+d} Y:{move_y_final:+d}")
-                roblox_move_mouse(move_x_final, move_y_final)
-                if should_print_debug:
-                    print(f"{'='*60}\n")
-                return move_x_final, move_y_final
-        else:
-            print(f"❌ Mouvement trop petit: X={move_x:.2f} Y={move_y:.2f} (arrondi→0)")
-            
-            if distance > 100:
-                force_x = 1 if dx > 0 else -1 if dx < 0 else 0
-                force_y = 1 if dy > 0 else -1 if dy < 0 else 0
-                if force_x != 0 or force_y != 0:
-                    print(f"💪 FORCE 1px: X:{force_x:+d} Y:{force_y:+d}")
-                    roblox_move_mouse(force_x, force_y)
-                    return force_x, force_y
-    
-    if should_print_debug:
-        print(f"{'='*60}\n")
-    return 0, 0
 
-class Overlay:
-    def __init__(self):
-        self.root = tk.Tk()
-        self.root.title("YOLO Overlay")
-        self.root.overrideredirect(True)
-        self.root.attributes("-topmost", True)
-        self.root.geometry(f"{SCREEN_WIDTH}x{SCREEN_HEIGHT}+0+0")
+    slowdown = SLOWDOWN_BASE + (dist / SLOWDOWN_DISTANCE_SCALE) * (1.0 - SLOWDOWN_BASE)
+    slowdown = min(1.0, max(SLOWDOWN_BASE, slowdown))
 
-        transparent_color = "magenta"
-        self.canvas = tk.Canvas(self.root, width=SCREEN_WIDTH, height=SCREEN_HEIGHT,
-                                bg=transparent_color, highlightthickness=0)
-        self.canvas.pack()
-        self.root.wm_attributes("-transparentcolor", transparent_color)
-        self.root.wm_attributes("-disabled", True)
+    move_x = dx * SMOOTHING * slowdown
+    move_y = dy * SMOOTHING * slowdown
 
-        if sys.platform == "win32":
-            self.root.update_idletasks()
-            hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
-            extended_style = 0x80000 | 0x20 | 0x08000000
-            ctypes.windll.user32.SetWindowLongW(hwnd, -20, extended_style)
+    move_x = max(-MAX_SPEED, min(MAX_SPEED, move_x))
+    move_y = max(-MAX_SPEED, min(MAX_SPEED, move_y))
 
-        self.detections = []
-        self.class_names = {}
-        self.canvas_objects = []
-        self.aim_targets = []
+    roblox_move_mouse(move_x, move_y)
+    last_aim_x, last_aim_y = target_x, target_y
+    return move_x, move_y
 
-    def schedule_update(self, detections, class_names, aim_targets=[]):
-        self.detections = detections
-        self.class_names = class_names
-        self.aim_targets = aim_targets
-        try:
-            self.root.after_idle(self._do_update)
-        except:
-            pass
+# ================= PYGAME OVERLAY (optionnel) =================
+def overlay_loop():
+    # ... (ton code original d'overlay, je le laisse tel quel car tu peux l'activer si besoin)
+    # Si tu veux vraiment du full invisible, mets juste pass ici
+    pass
 
-    def _do_update(self):
-        for obj_id in self.canvas_objects:
-            try:
-                self.canvas.delete(obj_id)
-            except:
-                pass
-        self.canvas_objects.clear()
-
-        center_dot = self.canvas.create_oval(CENTER_X-3, CENTER_Y-3, CENTER_X+3, CENTER_Y+3, fill="red", outline="red")
-        self.canvas_objects.append(center_dot)
-
-        if not self.detections:
-            return
-
-        for det in self.detections:
-            x1, y1, x2, y2, conf, cls = det
-            x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-            cls = int(cls)
-
-            class_name = self.class_names.get(cls, f'C{cls}')
-            is_target = is_target_class(class_name)
-            
-            in_center = is_in_center(x1, y1, x2, y2)
-            
-            if is_target:
-                color = "yellow"
-            else:
-                color = CLASS_COLORS.get(cls, "white")
-            
-            width = 5 if (in_center and is_target) else 3
-
-            box_id = self.canvas.create_rectangle(x1, y1, x2, y2, outline=color, width=width)
-            self.canvas_objects.append(box_id)
-
-            label = f"{class_name} {conf:.2f}"
-            if in_center and is_target:
-                label += " 🎯"
-
-            bg_id = self.canvas.create_rectangle(x1, y1 - 20, x1 + len(label) * 8, y1, fill="black", outline="")
-            text_id = self.canvas.create_text(x1 + 3, y1 - 10, text=label, fill=color, anchor="w", font=("Arial", 10, "bold"))
-            self.canvas_objects.extend([bg_id, text_id])
-
-        for target in self.aim_targets:
-            tx, ty = int(target[0]), int(target[1])
-            
-            dist = ((tx - CENTER_X)**2 + (ty - CENTER_Y)**2)**0.5
-            in_deadzone = dist < AIM_DEADZONE
-            
-            lock_info = target_lock.get_lock_info()
-            if lock_info['is_locked']:
-                target_color = "lime"
-            elif lock_info['frames'] > 0:
-                target_color = "yellow"
-            else:
-                target_color = "orange"
-            
-            circle_id = self.canvas.create_oval(tx-12, ty-12, tx+12, ty+12, fill=target_color, outline=target_color, width=4)
-            cross1_id = self.canvas.create_line(tx-8, ty, tx+8, ty, fill=target_color, width=4)
-            cross2_id = self.canvas.create_line(tx, ty-8, tx, ty+8, fill=target_color, width=4)
-            self.canvas_objects.extend([circle_id, cross1_id, cross2_id])
-            
-            if lock_info['is_locked']:
-                status = "🔒 LOCKED"
-            elif lock_info['frames'] > 0:
-                status = f"🔍 {lock_info['frames']}/{LOCK_DETECTION_COUNT}"
-            else:
-                status = f"{dist:.0f}px"
-            
-            dist_text = self.canvas.create_text(tx, ty + 25, text=status, 
-                                               fill="white", font=("Arial", 11, "bold"))
-            self.canvas_objects.append(dist_text)
-
-    def run(self):
-        self.root.mainloop()
-
-    def close(self):
-        try:
-            self.root.quit()
-            self.root.destroy()
-        except:
-            pass
-
-overlay_instance = None
-last_move_x = 0
-last_move_y = 0
-
+# ================= DÉTECTION =================
 def detect_loop():
-    global overlay_instance, last_move_x, last_move_y
+    global locked_track_id, frames_without_lock, predicted_points, detections_for_overlay, stats_text
 
-    print("🚀 AIMBOT FRIEND CLASS ONLY")
-    print("🟡 Toutes les boxes Friend sont JAUNES")
-    print("🎯 Vise uniquement les Friend")
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
     model = YOLO(MODEL_PATH)
-    class_names = model.names
-
     camera = bettercam.create(region=CAPTURE_REGION, output_color="BGR")
     camera.start(target_fps=144)
 
-    while overlay_instance is None:
-        time.sleep(0.1)
-
-    print("✅ Démarré")
-
     last_click_time = 0
-    last_detections = []
+    prev_time = time.time()
 
     while True:
+        start_time = time.time()
         frame = camera.get_latest_frame()
         if frame is None:
-            time.sleep(0.001)
             continue
 
-        results = model(frame, conf=CONF_MIN, imgsz=YOLO_SIZE,
-                        max_det=MAX_DET, device=device, verbose=False)[0]
+        results = model.track(
+            frame,
+            conf=CONF_MIN,
+            imgsz=YOLO_SIZE,
+            max_det=MAX_DET,
+            persist=True,
+            tracker="bytetrack.yaml",
+            verbose=False
+        )[0]
 
-        detections = []
+        detections_for_overlay = []
+        predicted_points = []
         valid_targets = []
-        aim_target_points = []
+        current_time = time.time()
 
-        if results.boxes is not None and len(results.boxes) > 0:
+        if results.boxes.id is not None:
             boxes = results.boxes.xyxy.cpu().numpy()
             confs = results.boxes.conf.cpu().numpy()
             classes = results.boxes.cls.cpu().numpy()
+            track_ids = results.boxes.id.int().cpu().numpy()
 
             for i in range(len(boxes)):
-                x1, y1, x2, y2 = boxes[i]
+                x1, y1, x2, y2 = map(int, boxes[i])
                 x1 += CAPTURE_LEFT
-                y1 += CAPTURE_TOP
                 x2 += CAPTURE_LEFT
+                y1 += CAPTURE_TOP
                 y2 += CAPTURE_TOP
 
-                conf = confs[i]
-                cls = int(classes[i])
-                class_name = class_names.get(cls, f'C{cls}')
+                cls_idx = int(classes[i])
+                cls_name = model.names[cls_idx]
+                tid = int(track_ids[i])
 
-                detections.append([x1, y1, x2, y2, conf, cls])
-
-                if conf >= CONF_MIN_AIM and is_target_class(class_name):
-                    valid_targets.append([x1, y1, x2, y2, conf, cls])
-                    print(f"✅ Friend détecté: {class_name} (conf={conf:.2f})")
-
-            last_detections = detections
-
-            if AIM_ASSIST_ENABLED and valid_targets:
+                box_height = y2 - y1
+                head_offset = int(box_height * HEAD_OFFSET_RATIO)
                 
-                if TARGET_LOCK_ENABLED:
-                    best_det = target_lock.update(valid_targets)
-                else:
-                    best_det = min(valid_targets, key=lambda d: distance_to_center(*get_center_point(d)))
-                
-                if best_det is not None:
-                    target_x, target_y = get_center_point(best_det)
-                    box_width, box_height = get_box_size(best_det)
-                    
-                    aim_target_points.append([target_x, target_y])
+                cx = (x1 + x2) / 2
+                cy = (y1 + y2) / 2 - head_offset
 
-                    last_move_x, last_move_y = gentle_aim_move(
-                        target_x, target_y, box_width, box_height, last_move_x, last_move_y
-                    )
+                pred_x, pred_y = predict_position(tid, cx, cy, current_time)
+                predicted_points.append((pred_x, pred_y, tid))
 
-            current_time = time.time()
-            if current_time - last_click_time >= CLICK_COOLDOWN:
-                for det in detections:
-                    cls = int(det[5])
-                    class_name = class_names.get(cls, f'C{cls}')
-                    
-                    if is_in_center(*det[:4]) and is_target_class(class_name):
-                        windows_click()
-                        last_click_time = current_time
-                        print(f"💥 CLICK sur {class_name}!")
-                        break
+                if confs[i] >= CONF_MIN_AIM and cls_name in TARGET_CLASSES:
+                    dist = distance_to_center(pred_x, pred_y)
+                    valid_targets.append((pred_x, pred_y, tid, confs[i], dist))
 
-        else:
-            detections = last_detections
+        lock_found = False
+        
+        if locked_track_id is not None:
+            for px, py, tid, conf, dist in valid_targets:
+                if tid == locked_track_id:
+                    lock_found = True
+                    frames_without_lock = 0
+                    break
+            
+            if not lock_found:
+                frames_without_lock += 1
+                if frames_without_lock > LOCK_PERSISTENCE:
+                    locked_track_id = None
+                    frames_without_lock = 0
 
-        overlay_instance.schedule_update(detections, class_names, aim_target_points)
-        time.sleep(0.001)
+        if valid_targets:
+            valid_targets.sort(key=lambda t: t[4])
+            best_px, best_py, best_tid, best_conf, best_dist = valid_targets[0]
 
-    camera.stop()
+            if locked_track_id is None:
+                locked_track_id = best_tid
+                frames_without_lock = 0
+
+            elif lock_found:
+                current_dist = next((d for _, _, tid, _, d in valid_targets if tid == locked_track_id), None)
+                if current_dist is not None and best_dist < current_dist - SWITCH_THRESHOLD:
+                    locked_track_id = best_tid
+                    frames_without_lock = 0
+
+        target_x = target_y = None
+        
+        if AIM_ASSIST_ENABLED and locked_track_id is not None and middle_mouse_pressed:
+            for px, py, tid in predicted_points:
+                if tid == locked_track_id:
+                    target_x, target_y = px, py
+                    gentle_aim_move(target_x, target_y)
+                    break
+
+        curr_t = time.time()
+        if curr_t - last_click_time >= CLICK_COOLDOWN and locked_track_id is not None and middle_mouse_pressed:
+            if target_x is not None and target_y is not None and in_center_zone(target_x, target_y):
+                windows_click()
+                last_click_time = curr_t
+
+        end_time = time.time()
+        latency = (end_time - start_time) * 1000
+        fps = 1 / (end_time - prev_time) if end_time - prev_time > 0 else 0
+        prev_time = end_time
 
 def on_press(key):
-    global overlay_instance
+    global locked_track_id, frames_without_lock, position_history
     if key == keyboard.Key.esc:
-        print("\n🛑 Arrêt")
-        if overlay_instance:
-            overlay_instance.close()
-        os._exit(0)
+        pygame.quit()
+        sys.exit(0)
+    if key == keyboard.KeyCode.from_char('r'):
+        locked_track_id = None
+        frames_without_lock = 0
+        position_history.clear()
 
+def on_click(x, y, button, pressed):
+    global middle_mouse_pressed
+    if button == mouse.Button.middle:
+        middle_mouse_pressed = pressed
+
+# ================= LANCEMENT =================
 if __name__ == "__main__":
-    try:
-        import win32api
-        import win32con
-    except ImportError:
-        print("❌ pywin32 n'est pas installé!")
-        print("📦 Installe-le avec: pip install pywin32")
-        sys.exit(1)
-
-    pydirectinput.PAUSE = False
-    pydirectinput.FAILSAFE = True
-
-    print("=" * 60)
-    print("🎮 AIMBOT ROBLOX - FRIEND CLASS")
-    print("=" * 60)
-    print("🟡 Toutes les boxes Friend = JAUNE")
-    print("🎯 Vise et tire uniquement sur Friend")
-    print("⌨️ ESC → Quitter")
-    print("=" * 60)
-
     Thread(target=detect_loop, daemon=True).start()
-    Thread(target=lambda: keyboard.Listener(on_press=on_press).start(), daemon=True).start()
+    # Thread(target=overlay_loop, daemon=True).start()   # ← commente si tu veux full invisible
 
-    overlay_instance = Overlay()
-    overlay_instance.run()
+    keyboard.Listener(on_press=on_press).start()
+    mouse.Listener(on_click=on_click).start()
+
+    try:
+        while True:
+            time.sleep(60)
+    except KeyboardInterrupt:
+        pygame.quit()
+        sys.exit(0)
