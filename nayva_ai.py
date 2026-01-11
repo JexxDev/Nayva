@@ -15,7 +15,12 @@ from collections import deque
 # ================= CONFIGURATION =================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 model_files = glob.glob(os.path.join(BASE_DIR, "**", "best.pt"), recursive=True)
-MODEL_PATH = model_files[0] if model_files else raise FileNotFoundError("best.pt introuvable")
+
+# ⚠️ Correction : raise ne peut pas être utilisé dans une expression ternaire
+if model_files:
+    MODEL_PATH = model_files[0]
+else:
+    raise FileNotFoundError("best.pt introuvable")
 
 CONF_MIN = 0.20          # un peu plus bas que 0.22
 CONF_MIN_AIM = 0.38      # ↓ pour lock plus facilement
@@ -136,13 +141,11 @@ def gentle_aim_move(target_x, target_y):
 
 # ================= PYGAME OVERLAY (optionnel) =================
 def overlay_loop():
-    # ... (ton code original d'overlay, je le laisse tel quel car tu peux l'activer si besoin)
-    # Si tu veux vraiment du full invisible, mets juste pass ici
-    pass
+    pass  # overlay invisible si tu veux
 
 # ================= DÉTECTION =================
 def detect_loop():
-    global locked_track_id, frames_without_lock, predicted_points, detections_for_overlay, stats_text
+    global locked_track_id, frames_without_lock, predicted_points, detections_for_overlay, stats_text, middle_mouse_pressed
 
     model = YOLO(MODEL_PATH)
     camera = bettercam.create(region=CAPTURE_REGION, output_color="BGR")
@@ -150,6 +153,12 @@ def detect_loop():
 
     last_click_time = 0
     prev_time = time.time()
+
+    locked_track_id = None
+    frames_without_lock = 0
+    predicted_points = []
+    detections_for_overlay = []
+    middle_mouse_pressed = False
 
     while True:
         start_time = time.time()
@@ -242,7 +251,7 @@ def detect_loop():
 
         curr_t = time.time()
         if curr_t - last_click_time >= CLICK_COOLDOWN and locked_track_id is not None and middle_mouse_pressed:
-            if target_x is not None and target_y is not None and in_center_zone(target_x, target_y):
+            if target_x is not None and target_y is not None and is_in_center(target_x, target_y):
                 windows_click()
                 last_click_time = curr_t
 
